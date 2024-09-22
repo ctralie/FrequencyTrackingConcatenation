@@ -238,3 +238,44 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_m
     if len(x.shape) == 1:
         x = x[None, :]
     return x
+
+def get_cqt(x, feature_params):
+    """
+    Compute the CQT
+
+    Parameters
+    ----------
+    x: ndarray(n_samples)
+        Audio samples to process
+    feature_params: {
+        hop: int
+            Hop length for CQT
+        sr: int
+            Audio sample rate
+        min_freq: float
+            Minimum frequency to use (in hz)
+        max_freq: float
+            Maximum frequency to use (in hz).  CQT may go slightly
+            beyond this to incorporate a full octave
+        bins_per_octave: int
+            Number of CQT bins per octave
+    }
+
+    Returns
+    -------
+    C: ndarray(n_bins, n_times)
+        Magnitude CQT
+    power: ndarray(n_times)
+        Powers of each CQT window
+    """
+    from librosa import cqt
+    hop = feature_params["hop"]
+    sr = feature_params["sr"]
+    fmin = feature_params["min_freq"]
+    fmax = feature_params["max_freq"]
+    bins_per_octave = feature_params["bins_per_octave"]
+    n_octaves = int(np.ceil(np.log2(fmax/fmin)))
+    n_bins = n_octaves*bins_per_octave
+    C = cqt(x, sr=sr, hop_length=hop, fmin=fmin, bins_per_octave=bins_per_octave, n_bins=n_bins, tuning=0)
+    power = 10*np.log10(np.sum(C**2/(hop*2), axis=0))
+    return C, power

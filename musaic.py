@@ -30,17 +30,12 @@ from scipy.io import wavfile
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", type=str, required=True, help="Path to audio file or directory for source sounds")
-    parser.add_argument("--target", type=str, required=True, help="Path to audio file for target sound, or \"mic\" if using the microphone to do real time")
-    parser.add_argument("--result", type=str, required=True, help="Path to wav file to which to save the result")
-    parser.add_argument("--recorded", type=str, default="recorded.wav", help="Path to wav file to which to the audio that was recorded (only relevant if target is mic)")
-    parser.add_argument("--winSize", type=int, default=2048, help="Window Size in samples")
+    parser.add_argument("--target", type=str, required=True, help="Path to audio file for target sound")
+    parser.add_argument("--hopLength", type=int, default=512, help="Window Size in samples")
+    parser.add_argument("--binsPerOctave", type=int, default=24, help="Number of CQT bins per octave")
     parser.add_argument("--sr", type=int, default=44100, help="Sample rate")
-    parser.add_argument("--minFreq", type=int, default=0, help="Minimum frequency to use (in hz), if using spectrogram bins directly")
-    parser.add_argument("--maxFreq", type=int, default=8000, help="Maximum frequency to use (in hz), if using spectrogram bins directly")
-    parser.add_argument("--useSTFT", type=int, default=1, help="If 1, use ordinary STFT bins")
-    parser.add_argument("--useMel", type=int, default=0, help="If 1, use mel-spaced bins")
-    parser.add_argument("--melBands", type=int, default=40, help="Number of mel bands to use")
-    parser.add_argument("--stereo", type=int, default=1, help="0-Mono, 1-Stereo Particle Left Only (Default), 2-Stereo Particles Each Channel")
+    parser.add_argument("--minFreq", type=int, default=0, help="Minimum frequency to use (in hz)")
+    parser.add_argument("--maxFreq", type=int, default=8000, help="Maximum frequency to use (in hz)")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device to use, or \"np\" for numpy")
     parser.add_argument("--nThreads", type=int, default=0, help="Use this number of threads in torch if specified")
     parser.add_argument("--r", type=int, default=7, help="Width of the repeated activation filter")
@@ -52,9 +47,6 @@ if __name__ == '__main__':
     parser.add_argument("--particles", type=int, default=2000, help="Number of particles in the particle filter")
     parser.add_argument("--useTopParticle", type=int, default=0, help="If true, take activations only from the top particle.  Otherwise, aggregate them")
     parser.add_argument("--temperature", type=float, default=50, help="Target importance.  Higher values mean activations will jump around more to match the target.")
-    parser.add_argument("--shiftMin", type=int, default=0, help="Lowest halfstep by which to shift corpus")
-    parser.add_argument("--shiftMax", type=int, default=0, help="Highest halfstep by which to shift corpus")
-    parser.add_argument("--targetShift", type=float, default=0, help="Number of halfsteps by which to pitch shift the target")
     parser.add_argument("--saveplots", type=int, default=1, help="Save plots of iterations to disk")
     opt = parser.parse_args()
 
@@ -79,13 +71,11 @@ if __name__ == '__main__':
     print("Finished loading up corpus audio: Elapsed Time {:.3f} seconds".format(time.time()-tic))
 
     feature_params = dict(
-        win=opt.winSize,
+        hop=opt.hopLength,
         sr=opt.sr,
         min_freq=opt.minFreq,
         max_freq=opt.maxFreq,
-        use_stft=opt.useSTFT == 1,
-        use_mel=opt.useMel == 1,
-        mel_bands=opt.melBands
+        bins_per_octave=opt.binsPerOctave
     )
     particle_params = dict(
         p=opt.p,
@@ -97,30 +87,17 @@ if __name__ == '__main__':
         r=opt.r,
         neff_thresh=0.1*opt.particles,
         alpha=opt.alpha,
-        use_top_particle=opt.useTopParticle == 1,
-        target_shift=opt.targetShift
+        use_top_particle=opt.useTopParticle == 1
     )
     couple_channels = opt.stereo < 2
     pf = ParticleAudioProcessor(ycorpus, feature_params, particle_params, opt.device, opt.target=="mic", couple_channels)
-    if opt.target == "mic":
-        while not pf.recording_started or (pf.recording_started and not pf.recording_finished):
-            time.sleep(2)
-        recorded = pf.get_recorded_audio()
-        wavfile.write(opt.recorded, opt.sr, recorded)
-    else:
-        print("Processing frames offline with particle filter...")
-        ytarget = load_corpus(opt.target, sr=opt.sr, stereo=(opt.stereo>0))
-        tic = time.time()
-        pf.process_audio_offline(ytarget)
-        print("Elapsed time offline particle filter: {:.3f}".format(time.time()-tic))    
-    generated = pf.get_generated_audio()
-    wavfile.write(opt.result, opt.sr, generated)
-
-    print("\n\nMean frame time: {:.3f}ms\nUpper Bound Budget: {:.3f}ms\n".format(1000*np.mean(pf.frame_times), 500*opt.winSize/opt.sr))
-
+    ytarget = load_corpus(opt.target, sr=opt.sr, stereo=(opt.stereo>0))
+    tic = time.time()
+    pf.process_audio_offline(ytarget)
+    print("Elapsed time offline particle filter: {:.3f}".format(time.time()-tic))
     if opt.saveplots == 1:
         import matplotlib.pyplot as plt
         plt.figure(figsize=(12, 8))
         pf.plot_statistics()
         plt.tight_layout()
-        plt.savefig("{}.svg".format(opt.result), bbox_inches='tight')
+        plt.savefig("Stats.svg", bbox_inches='tight')
