@@ -434,7 +434,7 @@ class ParticleAudioProcessor:
         n_channels = ytarget.shape[0]
 
         ## Step 1: Compute CQT on each channel
-        CTarget = [get_cqt(ytarget[i, :], self.feature_params) for i in range(n_channels)]
+        CTarget = [get_cqt(ytarget[i, :], self.feature_params)[0] for i in range(n_channels)]
 
         ## Step 2: Run each CQT frame through the particle filter
         for t in range(CTarget[0].shape[1]):
@@ -468,7 +468,7 @@ class ParticleAudioProcessor:
         plt.subplot2grid((2, 3), (0, 0), colspan=2)
         legend = []
         for (active_diffs, c) in zip(all_active_diffs, channels_to_plot):
-            t = np.arange(active_diffs.size)*self.win/(self.sr*2)
+            t = np.arange(active_diffs.size)*self.hop/(self.sr)
             plt.plot(t, active_diffs, linewidth=0.5)
             legend.append("{}: Mean {:.3f}".format(c.name, np.mean(active_diffs)))
         plt.legend(legend)

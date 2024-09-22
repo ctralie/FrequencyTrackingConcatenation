@@ -24,7 +24,6 @@ sys.path.append("src")
 from audioutils import load_corpus
 from particle import ParticleAudioProcessor
 import time
-from scipy.io import wavfile
 
 
 if __name__ == '__main__':
@@ -36,6 +35,7 @@ if __name__ == '__main__':
     parser.add_argument("--sr", type=int, default=44100, help="Sample rate")
     parser.add_argument("--minFreq", type=int, default=0, help="Minimum frequency to use (in hz)")
     parser.add_argument("--maxFreq", type=int, default=8000, help="Maximum frequency to use (in hz)")
+    parser.add_argument("--stereo", type=int, default=1, help="0-Mono, 1-Stereo Particle Left Only (Default), 2-Stereo Particles Each Channel")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device to use, or \"np\" for numpy")
     parser.add_argument("--nThreads", type=int, default=0, help="Use this number of threads in torch if specified")
     parser.add_argument("--r", type=int, default=7, help="Width of the repeated activation filter")
@@ -62,10 +62,7 @@ if __name__ == '__main__':
 
     print("Loading corpus audio...")
     tic = time.time()
-    ycorpus = load_corpus(opt.corpus, sr=opt.sr, 
-                          stereo=(opt.stereo>0),
-                          shift_min=opt.shiftMin,
-                          shift_max=opt.shiftMax)
+    ycorpus = load_corpus(opt.corpus, sr=opt.sr, stereo=(opt.stereo>0))
     print("ycorpus.shape", ycorpus.shape)
     print("Corpus is {:.2f} seconds long".format(ycorpus.shape[1]/opt.sr))
     print("Finished loading up corpus audio: Elapsed Time {:.3f} seconds".format(time.time()-tic))

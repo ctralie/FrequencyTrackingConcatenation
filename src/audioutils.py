@@ -277,5 +277,6 @@ def get_cqt(x, feature_params):
     n_octaves = int(np.ceil(np.log2(fmax/fmin)))
     n_bins = n_octaves*bins_per_octave
     C = cqt(x, sr=sr, hop_length=hop, fmin=fmin, bins_per_octave=bins_per_octave, n_bins=n_bins, tuning=0)
+    C = np.abs(C)
     power = 10*np.log10(np.sum(C**2/(hop*2), axis=0))
     return C, power
