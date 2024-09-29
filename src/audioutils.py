@@ -195,7 +195,6 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
         files = [f for f in files if os.path.isfile(f)]
     N = 0
     start_idxs = [0]
-            
     for f in sorted(files):
         try:
             try:
@@ -211,7 +210,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
             if quantum > 0:
                 n_quanta = int(np.ceil(x.shape[1]/quantum))
                 pad = np.zeros((x.shape[0], quantum*n_quanta-x.shape[1]))
-                x = np.concatenate((x, np.zeros(x.shape[0], pad)))
+                x = np.concatenate((x, pad), axis=1)
                 start_idxs.append(start_idxs[-1] + n_quanta)
 
             N += x.shape[1]
