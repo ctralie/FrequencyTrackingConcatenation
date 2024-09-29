@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from probutils import stochastic_universal_sample, do_KL, do_KL_torch, get_activations_diff_sparse, get_diag_lengths_sparse
 from observer import Observer
 from propagator import Propagator
-from audioutils import get_cqt
+from audioutils import get_cqt, hann_window, get_windowed
 import time
 
 CORPUS_DB_CUTOFF = -50
@@ -119,6 +119,7 @@ class ParticleFilterChannel:
         ## Step 1: Compute CQT features for corpus
         print("Computing corpus features for {}...".format(name), flush=True)
         WCorpus, WPowers = get_cqt(ycorpus, feature_params)
+        self.WSound, _ = get_windowed(ycorpus, hop*2, hann_window)
         self.WCorpus = WCorpus
         # Shrink elements that are too small
         self.WAlpha = self.alpha*np.array(WPowers <= CORPUS_DB_CUTOFF, dtype=np.float32)
@@ -336,7 +337,7 @@ class ParticleFilterChannel:
             kl = (torch.sum(Vt*torch.log(Vt/WH) - Vt + WH)).item()
         self.fit += kl
 
-        return h
+        return hnp
 
 class ParticleAudioProcessor:
     """
@@ -413,8 +414,7 @@ class ParticleAudioProcessor:
             for c in self.channels[1:]:
                 self.channels[0].coupled_channels.append(c)
         self.reset_state()
-        
-         
+
     def process_audio_offline(self, ytarget):
         """
         Process audio audio offline, frame by frame
@@ -437,6 +437,8 @@ class ParticleAudioProcessor:
         CTarget = [get_cqt(ytarget[i, :], self.feature_params)[0] for i in range(n_channels)]
 
         ## Step 2: Run each CQT frame through the particle filter
+        hop = self.hop
+        y = np.zeros((self.n_channels, CTarget[0].shape[1]*hop+hop), dtype=np.float32)
         for t in range(CTarget[0].shape[1]):
             tic = time.time()
             idxs = []
@@ -448,10 +450,12 @@ class ParticleAudioProcessor:
                     Vt = torch.from_numpy(Vt).to(self.device)
                 if i == 0 or not self.couple_channels:
                     idxs = c.do_particle_step(Vt)
-                c.fit_activations(Vt, idxs)
+                h = c.fit_activations(Vt, idxs)
+                y[i, t*hop:t*hop+hop*2] += c.WSound[:, idxs].dot(h)
             # Record elapsed time
             elapsed = time.time()-tic
             self.frame_times.append(elapsed)
+        return y
 
 
     def plot_statistics(self):

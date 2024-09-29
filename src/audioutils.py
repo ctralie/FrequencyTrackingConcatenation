@@ -149,7 +149,7 @@ def load_audio(filename, sr=44100, mono=True):
         y = y[0, :]
     return y, sr
 
-def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_min=0, shift_max=0):
+def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum=0):
     """
     Load a corpus of audio
 
@@ -169,12 +169,18 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_m
         Lowest halfstep by which to shift corpus
     shift_max: int
         Highest halfstep by which to shift corpus
+    quantum: int
+        If >0, pad each sample length to integer multiples of this amount
     
     Returns
     -------
     ndarray(n_channels, n_samples)
         The audio samples (leave as numpy so the user can choose
         the right torch types later)
+    files: list of n strings
+        String of each file
+    start_idxs: list of n+1 ints
+        Start quantum of each file (only returned if quantum > 0)
     """
     import glob
     import os
@@ -188,15 +194,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_m
         files = glob.glob(path + os.path.sep + "**", recursive=True)
         files = [f for f in files if os.path.isfile(f)]
     N = 0
-    pitch_shift = librosa.effects.pitch_shift
-    try:
-        import pyrubberband
-        pitch_shift = pyrubberband.pyrb.pitch_shift
-        print("Rubberband is available for pitch shifting")
-    except:
-        rg = list(range(shift_min, shift_max+1))
-        if len(rg) > 1 or rg[0] != 0:
-            print("Warning: pyrubberband not found.  Using simpler phase vocoder for pitch shifting")
+    start_idxs = [0]
             
     for f in sorted(files):
         try:
@@ -204,22 +202,22 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_m
                 x, sr = librosa.load(f, sr=sr, mono=not stereo)
             except:
                 x, sr = load_audio(f, sr=sr, mono=not stereo)
-            x_orig = x
-            for p in range(shift_min, shift_max+1):
-                if p != 0:
-                    print("Pitch shifting", f, "by", p, "halfsteps...")
-                    xs = pitch_shift(x_orig, sr=sr, n_steps=p)
-                    x = np.concatenate((x, xs), axis=1)
-            if stereo and len(x.shape) == 1:
-                x = np.array([x, x])
-            if stereo:
-                N += x.shape[1]
-                if dc_normalize:
-                    x -= np.mean(x, axis=1, keepdims=True)
-            else:
-                N += x.size
-                if dc_normalize:
-                    x -= np.mean(x)
+            if len(x.shape) == 1:
+                if stereo:
+                    x = np.array([x, x])
+                else:
+                    x = x[None, :]
+            
+            if quantum > 0:
+                n_quanta = int(np.ceil(x.shape[1]/quantum))
+                pad = np.zeros((x.shape[0], quantum*n_quanta-x.shape[1]))
+                x = np.concatenate((x, np.zeros(x.shape[0], pad)))
+                start_idxs.append(start_idxs[-1] + n_quanta)
+
+            N += x.shape[1]
+            if dc_normalize:
+                x -= np.mean(x, axis=1, keepdims=True)
+
             if amp_normalize:
                 norm = np.max(np.abs(x))
                 if norm > 0:
@@ -231,13 +229,11 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, shift_m
     if len(samples) == 0:
         print("Error: No usable files found at ", path)
     assert(len(samples) > 0)
-    if stereo:
-        x = np.concatenate(samples, axis=1)
-    else:
-        x = np.concatenate(samples)
-    if len(x.shape) == 1:
-        x = x[None, :]
-    return x
+    x = np.concatenate(samples, axis=1)
+    ret = (x, files)
+    if quantum > 0:
+        ret = (x, files, start_idxs)
+    return ret
 
 def get_cqt(x, feature_params):
     """
