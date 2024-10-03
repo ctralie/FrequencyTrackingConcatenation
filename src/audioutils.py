@@ -149,7 +149,7 @@ def load_audio(filename, sr=44100, mono=True):
         y = y[0, :]
     return y, sr
 
-def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum=0):
+def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, hop=0, verbose=False):
     """
     Load a corpus of audio
 
@@ -169,7 +169,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
         Lowest halfstep by which to shift corpus
     shift_max: int
         Highest halfstep by which to shift corpus
-    quantum: int
+    hop: int
         If >0, pad each sample length to integer multiples of this amount
     
     Returns
@@ -180,7 +180,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
     files: list of n strings
         String of each file
     start_idxs: list of n+1 ints
-        Start quantum of each file (only returned if quantum > 0)
+        Start of each file in units of hop (only returned if hop > 0)
     """
     import glob
     import os
@@ -194,8 +194,9 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
         files = glob.glob(path + os.path.sep + "**", recursive=True)
         files = [f for f in files if os.path.isfile(f)]
     N = 0
+    files = sorted(files)
     start_idxs = [0]
-    for f in sorted(files):
+    for f in files:
         try:
             try:
                 x, sr = librosa.load(f, sr=sr, mono=not stereo)
@@ -207,9 +208,9 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
                 else:
                     x = x[None, :]
             
-            if quantum > 0:
-                n_quanta = int(np.ceil(x.shape[1]/quantum))
-                pad = np.zeros((x.shape[0], quantum*n_quanta-x.shape[1]))
+            if hop > 0:
+                n_quanta = int(np.ceil(x.shape[1]/hop))
+                pad = np.zeros((x.shape[0], hop*n_quanta-x.shape[1]))
                 x = np.concatenate((x, pad), axis=1)
                 start_idxs.append(start_idxs[-1] + n_quanta)
 
@@ -221,7 +222,8 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
                 norm = np.max(np.abs(x))
                 if norm > 0:
                     x = x/norm
-            print("Finished {}, length {}".format(f, N/sr))
+            if verbose:
+                print("Finished {}, length {}".format(f, N/sr))
             samples.append(x)
         except:
             pass
@@ -230,7 +232,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, quantum
     assert(len(samples) > 0)
     x = np.concatenate(samples, axis=1)
     ret = (x, files)
-    if quantum > 0:
+    if hop > 0:
         ret = (x, files, start_idxs)
     return ret
 

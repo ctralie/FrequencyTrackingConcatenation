@@ -52,10 +52,12 @@ class ParticleFilterChannel:
         self.fit = 0 # KL fit
         self.num_resample = 0
 
-    def __init__(self, ycorpus, feature_params, particle_params, device, name="channel"):
+    def __init__(self, ycorpus, corpus_labels, feature_params, particle_params, device, name="channel"):
         """
         ycorpus: ndarray(n_samples)
             Audio samples for the corpus for this channel
+        corpus_labels: ndarray(n_samples//hop)
+            Labels of each corpus window
         feature_params: {
             hop: int
                 Hop length for CQT
@@ -119,8 +121,12 @@ class ParticleFilterChannel:
         ## Step 1: Compute CQT features for corpus
         print("Computing corpus features for {}...".format(name), flush=True)
         WCorpus, WPowers = get_cqt(ycorpus, feature_params)
-        self.WSound, _ = get_windowed(ycorpus, hop*2, hann_window)
+        WSound, _ = get_windowed(ycorpus, hop*2, hann_window)
+        if WSound.shape[1] < WCorpus.shape[1]:
+            diff = WCorpus.shape[1] - WSound.shape[1]
+            WSound = np.concatenate((WSound, np.zeros((WSound.shape[0], diff))), axis=1)
         self.WCorpus = WCorpus
+        self.WSound = WSound
         # Shrink elements that are too small
         self.WAlpha = self.alpha*np.array(WPowers <= CORPUS_DB_CUTOFF, dtype=np.float32)
         if self.device != "np":
@@ -133,8 +139,8 @@ class ParticleFilterChannel:
         ## Step 2: Setup observer and propagator
         N = WCorpus.shape[1]
         self.N = N
-        self.observer = Observer(self.p, WCorpus, self.WAlpha, self.L, self.temperature, device)
-        self.propagator = Propagator(N, self.pd, device)
+        self.observer = Observer(self.p, self.WCorpus, self.WAlpha, self.L, self.temperature, device)
+        self.propagator = Propagator(corpus_labels, self.pd, device)
         self.reset_state()
 
         print("Finished setting up particle filter for {}: Elapsed Time {:.3f} seconds".format(name, time.time()-tic))
@@ -357,10 +363,12 @@ class ParticleAudioProcessor:
         for c in self.channels:
             c.reset_state()
 
-    def __init__(self, ycorpus, feature_params, particle_params, device, couple_channels=True):
+    def __init__(self, ycorpus, start_idxs, feature_params, particle_params, device, couple_channels=True):
         """
         ycorpus: ndarray(n_channels, n_samples)
             Audio samples for the corpus, possibly multi-channel
+        start_idxs: list of n_samples//hop
+            Start of each file in the corpus, in units of hop
         feature_params: {
             hop: int
                 Hop length for CQT
@@ -409,7 +417,13 @@ class ParticleAudioProcessor:
         self.sr = feature_params["sr"]
         self.hop = feature_params["hop"]
         self.n_channels = ycorpus.shape[0]
-        self.channels = [ParticleFilterChannel(ycorpus[i, :], feature_params, particle_params, device, name="channel {}".format(i)) for i in range(ycorpus.shape[0])]
+        ## Compute an indicator vector of which file each corpus element is in
+        N = ycorpus.shape[1] // self.hop
+        corpus_labels = np.zeros(N, dtype=int)
+        for i in range(len(start_idxs)-1):
+            corpus_labels[start_idxs[i]:start_idxs[i+1]] = i
+        self.corpus_labels = corpus_labels
+        self.channels = [ParticleFilterChannel(ycorpus[i, :], corpus_labels, feature_params, particle_params, device, name="channel {}".format(i)) for i in range(ycorpus.shape[0])]
         if self.couple_channels:
             for c in self.channels[1:]:
                 self.channels[0].coupled_channels.append(c)
@@ -429,6 +443,7 @@ class ParticleAudioProcessor:
         ndarray(n_samples, n_channels)
             Generated audio
         """
+        from tqdm import tqdm
         if len(ytarget.shape) == 1:
             ytarget = ytarget[None, :] # Mono audio
         n_channels = ytarget.shape[0]
@@ -439,7 +454,7 @@ class ParticleAudioProcessor:
         ## Step 2: Run each CQT frame through the particle filter
         hop = self.hop
         y = np.zeros((self.n_channels, CTarget[0].shape[1]*hop+hop), dtype=np.float32)
-        for t in range(CTarget[0].shape[1]):
+        for t in tqdm(range(CTarget[0].shape[1])):
             tic = time.time()
             idxs = []
             for i, (c, V) in enumerate(zip(self.channels, CTarget)):
