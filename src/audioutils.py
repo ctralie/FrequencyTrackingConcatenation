@@ -236,7 +236,7 @@ def load_corpus(path, sr, stereo, dc_normalize=True, amp_normalize=True, hop=0, 
         ret = (x, files, start_idxs)
     return ret
 
-def get_cqt(x, feature_params):
+def get_cqt(x, feature_params, max_shift=0):
     """
     Compute the CQT
 
@@ -257,11 +257,13 @@ def get_cqt(x, feature_params):
         bins_per_octave: int
             Number of CQT bins per octave
     }
+    max_shift: int
+        Maximum CQT bins to shift up or down
 
     Returns
     -------
-    C: ndarray(n_bins, n_times)
-        Magnitude CQT
+    C: ndarray(n_bins+2*max_shift, n_times)
+        Magnitude CQT, padded on each end by max_shift
     power: ndarray(n_times)
         Powers of each CQT window
     """
@@ -276,4 +278,6 @@ def get_cqt(x, feature_params):
     C = cqt(x, sr=sr, hop_length=hop, fmin=fmin, bins_per_octave=bins_per_octave, n_bins=n_bins, tuning=0)
     C = np.abs(C)
     power = 10*np.log10(np.sum(C**2/(hop*2), axis=0))
+    if max_shift > 0:
+        C = np.pad(C, ((max_shift, max_shift), (0, 0)))
     return C, power

@@ -31,10 +31,11 @@ if __name__ == '__main__':
     parser.add_argument("--corpus", type=str, required=True, help="Path to audio file or directory for source sounds")
     parser.add_argument("--target", type=str, required=True, help="Path to audio file for target sound")
     parser.add_argument("--hopLength", type=int, default=512, help="Window Size in samples")
-    parser.add_argument("--binsPerOctave", type=int, default=24, help="Number of CQT bins per octave")
+    parser.add_argument("--binsPerOctave", type=int, default=12, help="Number of CQT bins per octave")
     parser.add_argument("--sr", type=int, default=44100, help="Sample rate")
-    parser.add_argument("--minFreq", type=int, default=0, help="Minimum frequency to use (in hz)")
+    parser.add_argument("--minFreq", type=int, default=32.7, help="Minimum frequency to use (in hz)")
     parser.add_argument("--maxFreq", type=int, default=8000, help="Maximum frequency to use (in hz)")
+    parser.add_argument("--maxShift", type=int, default=2, help="Maximum CQT bins to shift up or down")
     parser.add_argument("--stereo", type=int, default=1, help="0-Mono, 1-Stereo Particle Left Only (Default), 2-Stereo Particles Each Channel")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device to use, or \"np\" for numpy")
     parser.add_argument("--nThreads", type=int, default=0, help="Use this number of threads in torch if specified")
@@ -84,7 +85,8 @@ if __name__ == '__main__':
         r=opt.r,
         neff_thresh=0.1*opt.particles,
         alpha=opt.alpha,
-        use_top_particle=opt.useTopParticle == 1
+        use_top_particle=opt.useTopParticle == 1,
+        max_shift=opt.maxShift
     )
     couple_channels = opt.stereo < 2
     pf = ParticleAudioProcessor(ycorpus, feature_params, particle_params, opt.device, opt.target=="mic", couple_channels)

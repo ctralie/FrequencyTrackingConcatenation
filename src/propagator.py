@@ -16,7 +16,7 @@ The licensor cannot revoke these freedoms as long as you follow the license term
 import numpy as np
 
 class Propagator:
-    def __init__(self, corpus_labels, pd, device):
+    def __init__(self, corpus_labels, pd, max_shift, device):
         """
         Constructor for a class that computes transition probabilities
 
@@ -26,6 +26,8 @@ class Propagator:
             File label of each corpus element
         pd: float
             Probability of remaining in the same column in time order
+        max_shift: int
+            Maximum CQT bins to shift up or down
         """
         self.N = len(corpus_labels)
         corpus_labels = np.concatenate((corpus_labels, -np.ones(2))) # Dummy to deal with boundaries 
@@ -34,6 +36,7 @@ class Propagator:
             corpus_labels = torch.from_numpy(corpus_labels).to(device)
         self.corpus_labels = corpus_labels
         self.pd = pd
+        self.max_shift = max_shift
         self.device = device
 
     def update_pd(self, pd):
@@ -47,7 +50,7 @@ class Propagator:
         """
         return self.pd/(1-self.pd)
 
-    def propagate(self, states):
+    def propagate(self, states, shifts):
         """
         Advance each particle forward randomly based on the transition model
         NOTE: For ease of implementation, the probability of remaining fixed
@@ -58,6 +61,8 @@ class Propagator:
         states: torch.tensor(P, p, dtype=int32)
             Column choices in W corresponding to each particle.
             This is updated by reference
+        shifts: torch.tensor(P, p, dtype=int32)
+            Pitch shift of each window
         """
         pd = None
         pd = self.pd
@@ -73,8 +78,10 @@ class Propagator:
         new_loc = ~move_forward
         if self.device == "np":
             n_new = np.sum(new_loc)
-            states[new_loc == 1] = np.random.randint(N, size=(n_new,))
+            states[new_loc == 1] = np.random.randint(N, size=(n_new,)) ## TODO: Skew distribution so a 0 shift is more likely
+            shifts[new_loc == 1] = np.random.randint(-self.max_shift, self.max_shift+1, size=(n_new,))
         else:
             import torch
             n_new = torch.sum(new_loc)
             states[new_loc == 1] = torch.randint(N, size=(n_new,), dtype=torch.int32).to(self.device)
+            shifts[new_loc == 1] = torch.randint(-self.max_shift, self.max_shift+1, size=(n_new,), dtype=torch.int32).to(self.device)

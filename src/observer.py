@@ -18,7 +18,7 @@ from threading import Lock
 
 
 class Observer:
-    def __init__(self, p, W, WAlpha, L, temperature, device):
+    def __init__(self, p, W, WAlpha, L, temperature, max_shift, device):
         """
         Constructor for a class that computes observation probabilities
 
@@ -34,6 +34,8 @@ class Observer:
             Number of iterations of KL
         temperature: float
             Temperature for observation probabilities
+        max_shift: int
+            Maximum CQT bins to shift up or down
         """
         self.p = p
         self.L = L
@@ -41,9 +43,11 @@ class Observer:
         self.temperature_mutex = Lock()
         self.W = W
         self.WAlpha = WAlpha
+        self.max_shift = max_shift
         self.device = device
         if device == "np":
             WDenom = np.sum(W, axis=0)
+            WDenom = np.pad(WDenom, (max_shift, max_shift))
         else:
             import torch
             WDenom = torch.sum(W, dim=0)
@@ -54,7 +58,7 @@ class Observer:
         with self.temperature_mutex:
             self.temperature = temperature
 
-    def observe_np(self, states, Vt):
+    def observe_np(self, states, shifts, Vt):
         """
         Compute the observation probabilities for a set of states
         at a particular time.
@@ -63,6 +67,8 @@ class Observer:
         ----------
         states: ndarray(P, p)
             Column choices in W corresponding to each particle
+        shifts: ndarray(P, p)
+            Pitch shift of each window
         Vt: ndarray(M, 1)
             Observation for this time
         
@@ -74,7 +80,10 @@ class Observer:
         ## Step 1: Run NMF
         P = states.shape[0]
         p = states.shape[1]
+        CN = self.W.shape[0] - 2*self.max_shift
         Wi = self.W[:, states]
+        idx = np.arange(self.max_shift, self.max_shift+CN)[:, None, None] - shifts[None, :, :]
+        Wi = np.take_along_axis(Wi, idx, axis=0) # Do hypothetical pitch shifts
         Wd = self.WDenom[states].reshape((P, p))
         hi = np.random.rand(P, p).astype(np.float32)
         Vt = np.reshape(Vt, (1, Vt.size))
@@ -100,7 +109,7 @@ class Observer:
             obs_prob /= denom
         return obs_prob
 
-    def observe_torch(self, states, Vt):
+    def observe_torch(self, states, shifts, Vt):
         """
         Compute the observation probabilities for a set of states
         at a particular time.
@@ -110,6 +119,8 @@ class Observer:
         ----------
         states: torch.tensor(P, p)
             Column choices in W corresponding to each particle
+        shifts: ndarray(P, p)
+            Pitch shift of each window
         Vt: torch.tensor(M, 1)
             Observation for this time
         
@@ -123,6 +134,9 @@ class Observer:
         P = states.shape[0]
         p = states.shape[1]
         Wi = self.W[:, states]
+        CN = self.W.shape[0] - 2*self.max_shift
+        idx = torch.arange(self.max_shift, self.max_shift+CN).view(CN, 1, 1).to(shifts) - shifts.unsqueeze(0)
+        Wi = torch.take_along_dim(Wi, idx.long(), dim=0) # Do hypothetical pitch shifts
         Wi = torch.movedim(Wi, 1, 0)
         Wd = self.WDenom[states].view(P, p, 1)
         hi = torch.rand(P, p, 1).to(Wi)
@@ -149,7 +163,7 @@ class Observer:
             obs_prob /= denom
         return obs_prob
 
-    def observe(self, states, Vt):
+    def observe(self, states, shifts, Vt):
         """
         Compute the observation probabilities for a set of states
         at a particular time.
@@ -159,6 +173,8 @@ class Observer:
         ----------
         states: ndarray(P, p) or torch.tensor(P, p)
             Column choices in W corresponding to each particle
+        shifts: ndarray(P, p) or torch.tensor(P, p)
+            Pitch shift of each window
         Vt: ndarray(M, 1) or torch.tensor(M, 1)
             Observation for this time
         
@@ -168,6 +184,6 @@ class Observer:
             Observation probabilities
         """
         if self.device == "np":
-            return self.observe_np(states, Vt)
+            return self.observe_np(states, shifts, Vt)
         else:
-            return self.observe_torch(states, Vt)
+            return self.observe_torch(states, shifts, Vt)

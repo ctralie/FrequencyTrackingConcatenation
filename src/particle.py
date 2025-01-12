@@ -35,10 +35,12 @@ class ParticleFilterChannel:
         self.ws = np.array(np.ones(self.P)/self.P, dtype=np.float32) # Particle weights
         if self.device == "np":
             self.states = np.random.randint(self.N, size=(self.P, self.p))
+            self.shifts = np.zeros(shape=(self.P, self.p), dtype=int)
         else:
             import torch
             self.ws = torch.from_numpy(self.ws).to(self.device) 
             self.states = torch.randint(self.N, size=(self.P, self.p), dtype=torch.int32).to(self.device) # Particles
+            self.shifts = torch.randint(-self.max_shift, self.max_shift+1, size=(self.P, self.p), dtype=torch.int32).to(self.device) # Pitch shifts
 
     def reset_state(self):
         self.neff = [] # Number of effective particles over time
@@ -46,6 +48,7 @@ class ParticleFilterChannel:
         self.ws = [] # Weights over time
         self.topcounts = [] 
         self.chosen_idxs = [] # Keep track of chosen indices
+        self.chosen_shifts = [] # Keep track of the chosen pitch shifts in a parallel array
         self.H = [] # Activations of chosen indices
         self.reset_particles()
         self.all_ws = []
@@ -68,7 +71,9 @@ class ParticleFilterChannel:
             max_freq: float
                 Maximum frequency to use (in hz)
             bins_per_octave: int
-                Number of CQT bins per octave
+                Number of CQT bins per octave,
+            max_shift: int
+                Maximum CQT bins to shift up or down
         }
         particle_params: {
             p: int
@@ -112,6 +117,7 @@ class ParticleFilterChannel:
         self.neff_thresh = particle_params["neff_thresh"]
         self.alpha = particle_params["alpha"]
         self.use_top_particle = particle_params["use_top_particle"]
+        self.max_shift = feature_params["max_shift"]
         self.device = device
         self.sr = sr
         self.hop = hop
@@ -120,13 +126,8 @@ class ParticleFilterChannel:
 
         ## Step 1: Compute CQT features for corpus
         print("Computing corpus features for {}...".format(name), flush=True)
-        WCorpus, WPowers = get_cqt(ycorpus, feature_params)
-        WSound, _ = get_windowed(ycorpus, hop*2, hann_window)
-        if WSound.shape[1] < WCorpus.shape[1]:
-            diff = WCorpus.shape[1] - WSound.shape[1]
-            WSound = np.concatenate((WSound, np.zeros((WSound.shape[0], diff))), axis=1)
+        WCorpus, WPowers = get_cqt(ycorpus, feature_params, max_shift=self.max_shift)
         self.WCorpus = WCorpus
-        self.WSound = WSound
         # Shrink elements that are too small
         self.WAlpha = self.alpha*np.array(WPowers <= CORPUS_DB_CUTOFF, dtype=np.float32)
         if self.device != "np":
@@ -139,8 +140,8 @@ class ParticleFilterChannel:
         ## Step 2: Setup observer and propagator
         N = WCorpus.shape[1]
         self.N = N
-        self.observer = Observer(self.p, self.WCorpus, self.WAlpha, self.L, self.temperature, device)
-        self.propagator = Propagator(corpus_labels, self.pd, device)
+        self.observer = Observer(self.p, self.WCorpus, self.WAlpha, self.L, self.temperature, self.max_shift, device)
+        self.propagator = Propagator(corpus_labels, self.pd, self.max_shift, device)
         self.reset_state()
 
         print("Finished setting up particle filter for {}: Elapsed Time {:.3f} seconds".format(name, time.time()-tic))
@@ -184,6 +185,13 @@ class ParticleFilterChannel:
             activations chosen in the last steps
         diag_len: int
             Number of steps to look back for diagonal promotion
+        
+        Returns
+        -------
+        idxs: ndarray(pfinal, dtype=int)
+            Indices into the corpus of the final best activations chosen
+        shifts: ndarray(pfinal, dtype=int)
+            An array parallel to idxs which holds the pitch shifts of these activations
         """
         ## Step 1: Aggregate max particles
         PTop = int(self.neff_thresh)
@@ -193,50 +201,61 @@ class ParticleFilterChannel:
             ws = ws.cpu().numpy()
         idxs = np.argpartition(-ws, PTop)[0:PTop]
         states = self.states[idxs, :]
+        shifts = self.shifts[idxs, :]
         if self.device != "np":
             states = states.cpu().numpy()
+            shifts = shifts.cpu().numpy()
         ws = ws[idxs]
         probs = {}
-        for w, state in zip(ws, states):
-            for idx in state:
-                if not idx in probs:
-                    probs[idx] = w
+        for wi, statesi, shiftsi in zip(ws, states, shifts):
+            for idx, s in zip(statesi, shiftsi):
+                if not (idx, s) in probs:
+                    probs[(idx, s)] = wi
                 else:
-                    probs[idx] += w
+                    probs[(idx, s)] += wi
         
         ## Step 2: Promote states that follow the last state that was chosen
         promoted_idxs = set([])
         for dc in range(1, min(diag_len, len(self.chosen_idxs))+1):
-            last_state = self.chosen_idxs[-dc]+dc
-            last_state = last_state[last_state < N]
-            for idx in last_state:
-                if not idx in promoted_idxs:
-                    if idx in probs:
-                        probs[idx] *= diag_fac
-                    promoted_idxs.add(idx)
+            last_states = self.chosen_idxs[-dc]+dc
+            last_shifts = self.chosen_shifts[-dc][last_states < N]
+            last_states = last_states[last_states < N]
+            for idx, s in zip(last_states, last_shifts):
+                if not (idx, s) in promoted_idxs:
+                    if (idx, s) in probs:
+                        probs[(idx, s)] *= diag_fac
+                    promoted_idxs.add((idx, s))
 
         ## Step 3: Zero out activations that happened over the last
         # r steps prevent repeated activations
         for dc in range(1, min(self.r, len(self.chosen_idxs))+1):
-            for idx in self.chosen_idxs[-dc]:
-                if idx in probs:
-                    probs.pop(idx)
+            for idx, s in zip(self.chosen_idxs[-dc], self.chosen_shifts[-dc]):
+                if (idx, s) in probs:
+                    probs.pop((idx, s))
         
-        ## Step 4: Choose top corpus activations
-        idxs = np.array(list(probs.keys()), dtype=int)
-        res = idxs
-        if res.size <= self.pfinal:
-            if res.size == 0:
-                # If for some strange reason all the weights were 0
-                res = np.random.randint(N, size=(self.pfinal,))
+        ## Step 4: Choose top pfinal corpus activations
+        items = list(probs.items())
+        idxs = np.array([k[0][0] for k in items], dtype=int)
+        shifts = np.array([k[0][1] for k in items], dtype=int)
+        if idxs.size <= self.pfinal:
+            # In some rare cases, we don't have enough activations to choose from
+            # so we have to duplicate some of them
+            if idxs.size == 0:
+                # In the incredibly rare case that all the weights were 0
+                # simply choose random windows with zero shifts
+                idxs = np.random.randint(N, size=(self.pfinal,))
+                shifts = np.zeros(self.pfinal, dtype=int)
             else:
-                while res.size < self.pfinal:
-                    res = np.concatenate((res, res))[0:self.pfinal]
+                while idxs.size < self.pfinal:
+                    idxs = np.concatenate((idxs, idxs))[0:self.pfinal]
+                    shifts = np.concatenate((shifts, shifts))[0:self.pfinal]
         else:
             # Common case: Choose top pfinal corpus positions by weight
-            vals = np.array(list(probs.values()))
-            res = idxs[np.argpartition(-vals, self.pfinal)[0:self.pfinal]]
-        return res
+            vals = np.array([k[1] for k in items])
+            top_idxs = np.argpartition(-vals, self.pfinal)[0:self.pfinal]
+            idxs = idxs[top_idxs]
+            shifts = shifts[top_idxs]
+        return idxs, shifts
 
     def do_particle_step(self, Vt):
         """
@@ -249,14 +268,16 @@ class ParticleFilterChannel:
 
         Returns
         -------
-        ndarray(p)
-            Indices of best activations
+        top_idxs: ndarray(pfinal, dtype=int)
+            Indices into the corpus of the final best activations chosen
+        top_shifts: ndarray(pfinal, dtype=int)
+            An array parallel to idxs which holds the pitch shifts of these activations
         """
         ## Step 1: Propagate
-        self.propagator.propagate(self.states)
+        self.propagator.propagate(self.states, self.shifts)
 
         ## Step 2: Apply the observation probability updates
-        self.ws *= self.observer.observe(self.states, Vt)
+        self.ws *= self.observer.observe(self.states, self.shifts, Vt)
 
         ## Step 3: Figure out the activations for this timestep
         ## by aggregating multiple particles near the top
@@ -266,10 +287,13 @@ class ParticleFilterChannel:
             import torch
             self.wsmax.append(torch.max(self.ws).item())
         if self.use_top_particle:
-            top_idxs = self.states[torch.argmax(self.ws), :]
+            selection = torch.argmax(self.ws)
+            top_idxs = self.states[selection, :]
+            top_shifts = self.shifts[selection, :]
         else:
-            top_idxs = self.aggregate_top_activations()
+            top_idxs, top_shifts = self.aggregate_top_activations()
         self.chosen_idxs.append(top_idxs)
+        self.chosen_shifts.append(top_shifts)
         
         ## Step 4: Resample particles if effective number is too low
         if self.device == "np":
@@ -290,15 +314,16 @@ class ParticleFilterChannel:
                 import torch
                 choices = torch.from_numpy(choices).to(self.device)
             self.states = self.states[choices, :]
+            self.shifts = self.shifts[choices, :]
             if self.device == "np":
                 self.ws = np.ones(self.ws.shape)/self.ws.size
             else:
                 import torch
                 self.ws = torch.ones(self.ws.shape).to(self.ws)/self.ws.numel()
 
-        return top_idxs
+        return top_idxs, top_shifts
     
-    def fit_activations(self, Vt, idxs):
+    def fit_activations(self, Vt, idxs, shifts):
         """
         Fit activations and mix audio
 
@@ -308,6 +333,8 @@ class ParticleFilterChannel:
             CQT frame at this time
         idxs: ndarray(p, dtype=int)
             Indices of activations to use
+        shifts: ndarray(p, dtype=int)
+            Shifts of these activations
         
         Returns
         -------
@@ -318,7 +345,11 @@ class ParticleFilterChannel:
         kl_fn = do_KL
         if self.device != "np":
             kl_fn = do_KL_torch
-        h = kl_fn(self.WCorpus[:, idxs], self.WAlpha[idxs], Vt[:, 0], self.L)
+        Wi = self.WCorpus[:, idxs]
+        CN = Wi.shape[0] - 2*self.max_shift
+        idx = np.arange(self.max_shift, self.max_shift+CN)[:, None] - shifts[None, :]
+        Wi = np.take_along_axis(Wi, idx, axis=0) # Take properly pitch-shifted features
+        h = kl_fn(Wi, self.WAlpha[idxs], Vt[:, 0], self.L)
         hnp = h
         if self.device != "np":
             hnp = h.cpu().numpy()
@@ -326,10 +357,10 @@ class ParticleFilterChannel:
 
         ## Step 2: Accumulate KL term for fit
         if self.device == "np":
-            WH = self.WCorpus[:, idxs].dot(h)
+            WH = Wi.dot(h)
         else:
             from torch import matmul
-            WH = matmul(self.WCorpus[:, idxs], h)
+            WH = matmul(Wi, h)
         Vt = Vt.flatten()
         # Take care of numerical issues
         Vt = Vt[WH > 0]
@@ -380,6 +411,8 @@ class ParticleAudioProcessor:
                 Maximum frequency to use (in hz)
             bins_per_octave: int
                 Number of CQT bins per octave
+            max_shift: int
+                Maximum CQT bins to shift up or down
         }
         particle_params: {
             p: int
@@ -417,6 +450,7 @@ class ParticleAudioProcessor:
         self.sr = feature_params["sr"]
         self.hop = feature_params["hop"]
         self.n_channels = ycorpus.shape[0]
+        self.ycorpus = ycorpus
         ## Compute an indicator vector of which file each corpus element is in
         N = ycorpus.shape[1] // self.hop
         corpus_labels = np.zeros(N, dtype=int)
@@ -454,9 +488,11 @@ class ParticleAudioProcessor:
         ## Step 2: Run each CQT frame through the particle filter
         hop = self.hop
         y = np.zeros((self.n_channels, CTarget[0].shape[1]*hop+hop), dtype=np.float32)
+        hann_samples = hann_window(hop*2)
         for t in tqdm(range(CTarget[0].shape[1])):
             tic = time.time()
             idxs = []
+            shifts = []
             for i, (c, V) in enumerate(zip(self.channels, CTarget)):
                 # Run each particle filter on its channel of audio
                 Vt = V[:, t][:, None]
@@ -464,9 +500,25 @@ class ParticleAudioProcessor:
                     import torch
                     Vt = torch.from_numpy(Vt).to(self.device)
                 if i == 0 or not self.couple_channels:
-                    idxs = c.do_particle_step(Vt)
-                h = c.fit_activations(Vt, idxs)
-                y[i, t*hop:t*hop+hop*2] += c.WSound[:, idxs].dot(h)
+                    idxs, shifts = c.do_particle_step(Vt)
+                h = c.fit_activations(Vt, idxs, shifts)
+                yt = np.zeros(hop*2)
+                for hi, idx, shift in zip(h, idxs, shifts):
+                    if shift == 0:
+                        yti = self.ycorpus[i, idx*hop:idx*hop+2*hop]
+                    else:
+                        from pyrubberband import pyrb
+                        ## Take a half a second of audio for enough context to shift
+                        chunk = self.sr//4
+                        yti = self.ycorpus[i, idx*hop:idx*hop+chunk]
+                        if yti.size < chunk:
+                            yti = np.concatenate((yti, np.zeros(chunk-yti.size)))
+                        yti = pyrb.pitch_shift(yti, self.sr, shift)
+                        yti = yti[0:hop*2]
+                    if yti.size < 2*hop:
+                        yti = np.concatenate((yti, np.zeros(2*hop-yti.size)))
+                    yt += hi*yti
+                y[i, t*hop:t*hop+2*hop] += hann_samples*yt
             # Record elapsed time
             elapsed = time.time()-tic
             self.frame_times.append(elapsed)
